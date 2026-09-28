@@ -1,0 +1,6 @@
+{
+  "name": "PayVerify - Bank Slip Auto-Verification & Fraud Engine",
+  "description": "High-throughput bank transfer slip auto-verification system with SHA-256 deduplication, Gemini multimodal tamper extraction, and real-time bank SMS cross-reconciliation.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
