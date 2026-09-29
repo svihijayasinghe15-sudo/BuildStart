@@ -17,6 +17,7 @@ import { SmsFeedView } from './components/SmsFeedView';
 import { ScenarioLab } from './components/ScenarioLab';
 import { AuditLogView } from './components/AuditLogView';
 import { ConfigView } from './components/ConfigView';
+import { ReportView } from './components/ReportView';
 import { SmsSimulatorModal } from './components/SmsSimulatorModal';
 import { SlipImageModal } from './components/SlipImageModal';
 import { ManualOverrideModal } from './components/ManualOverrideModal';
@@ -40,7 +41,7 @@ import {
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<
-    'workbench' | 'submissions' | 'sms' | 'scenarios' | 'audit' | 'config'
+    'workbench' | 'submissions' | 'sms' | 'scenarios' | 'audit' | 'config' | 'report'
   >('workbench');
 
   const [orders, setOrders] = useState<Order[]>([]);
@@ -255,6 +256,8 @@ export default function App() {
             onConfigUpdated={(cfg) => setMerchantConfig(cfg)}
           />
         )}
+
+        {activeTab === 'report' && <ReportView />}
       </main>
 
       {/* Footer */}

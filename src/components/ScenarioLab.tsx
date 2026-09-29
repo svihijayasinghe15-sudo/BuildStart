@@ -1,5 +1,5 @@
-import React from 'react';
-import { Play, CheckCircle2, XCircle, Clock, ShieldCheck, AlertTriangle, ArrowRight } from 'lucide-react';
+import React, { useState } from 'react';
+import { Play, CheckCircle2, XCircle, Clock, ShieldCheck, AlertTriangle, ArrowRight, Filter } from 'lucide-react';
 import { TestScenario } from '../types/payment';
 
 interface ScenarioLabProps {
@@ -11,6 +11,15 @@ export const ScenarioLab: React.FC<ScenarioLabProps> = ({
   scenarios,
   onSelectScenario,
 }) => {
+  const [selectedFilter, setSelectedFilter] = useState<string>('ALL');
+
+  const categories = ['ALL', 'Golden Path', 'Rule Engine', 'Fraud Defense', 'Uncertainty Handling', 'Cross-Reconciliation', 'Anti-False-Attribution'];
+
+  const filteredScenarios = scenarios.filter((sc) => {
+    if (selectedFilter === 'ALL') return true;
+    return sc.category.toLowerCase() === selectedFilter.toLowerCase();
+  });
+
   const getExpectedBadge = (decision: string) => {
     switch (decision) {
       case 'APPROVED':
@@ -41,23 +50,46 @@ export const ScenarioLab: React.FC<ScenarioLabProps> = ({
       <div className="rounded-xl border border-slate-800 bg-slate-900/80 p-5 shadow-sm">
         <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
           <div>
-            <h3 className="text-base font-semibold text-white">Scenario Test Bench (10 Edge Cases)</h3>
-            <p className="text-xs text-slate-400 mt-1 max-w-2xl leading-relaxed">
-              Comprehensive automated test suite covering zero-cost SHA-256 deduplication, Gemini multimodal
-              tamper detection, account routing verification, reference collision, and bank SMS cross-reconciliation.
+            <div className="flex items-center gap-2 text-xs font-mono text-cyan-400 mb-1">
+              <span>COMPREHENSIVE TEST LAB</span>
+              <span>·</span>
+              <span>12 OPERATIONAL SITUATIONS</span>
+            </div>
+            <h3 className="text-base font-semibold text-white">Full Operational Validation Suite</h3>
+            <p className="text-xs text-slate-400 mt-1 max-w-3xl leading-relaxed">
+              Verifies normal payments, wrong amounts, wrong accounts, duplicate slips, reused payments,
+              differing image crops, old/stale slips, edited/manipulated receipts, unclear images,
+              conflicting evidence, missing evidence, and multi-customer payment disambiguation.
             </p>
           </div>
           <div className="flex items-center gap-2">
-            <span className="rounded bg-cyan-950/60 border border-cyan-800/50 px-2.5 py-1 text-xs font-mono text-cyan-300">
-              {scenarios.length} Scenarios Ready
+            <span className="rounded bg-cyan-950/60 border border-cyan-800/50 px-3 py-1.5 text-xs font-mono text-cyan-300">
+              {scenarios.length} Test Vectors Ready
             </span>
           </div>
+        </div>
+
+        {/* Category Filters */}
+        <div className="mt-4 flex items-center gap-1.5 flex-wrap border-t border-slate-800 pt-3">
+          {categories.map((cat) => (
+            <button
+              key={cat}
+              onClick={() => setSelectedFilter(cat)}
+              className={`px-2.5 py-1 text-[11px] font-medium rounded-md transition-colors whitespace-nowrap ${
+                selectedFilter === cat
+                  ? 'bg-cyan-950 text-cyan-300 border border-cyan-800/60'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
+              }`}
+            >
+              {cat}
+            </button>
+          ))}
         </div>
       </div>
 
       {/* Grid of Scenarios */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {scenarios.map((scenario) => (
+        {filteredScenarios.map((scenario) => (
           <div
             key={scenario.id}
             className="flex flex-col justify-between rounded-xl border border-slate-800 bg-slate-900/60 p-5 hover:border-slate-700 transition-all space-y-4"
@@ -65,7 +97,7 @@ export const ScenarioLab: React.FC<ScenarioLabProps> = ({
             <div>
               <div className="flex items-center justify-between gap-2">
                 <span className="text-xs font-mono text-cyan-400 uppercase tracking-wider font-semibold">
-                  {scenario.category}
+                  {scenario.situation}
                 </span>
                 {getExpectedBadge(scenario.expectedDecision)}
               </div>
@@ -77,11 +109,14 @@ export const ScenarioLab: React.FC<ScenarioLabProps> = ({
                 <div className="text-slate-300 truncate">
                   Target: #{scenario.orderId} · {scenario.slipDescription}
                 </div>
-                {scenario.expectedStageFailure && (
-                  <div className="text-rose-400 mt-0.5">
-                    Triggered Failure at Stage {scenario.expectedStageFailure} (Early Exit)
-                  </div>
-                )}
+                <div className="flex items-center justify-between mt-1 text-[10px]">
+                  <span className="text-slate-500">Category: {scenario.category}</span>
+                  {scenario.expectedStageFailure && (
+                    <span className="text-rose-400">
+                      Evaluated at Stage {scenario.expectedStageFailure}
+                    </span>
+                  )}
+                </div>
               </div>
             </div>
 

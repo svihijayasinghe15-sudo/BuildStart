@@ -8,6 +8,7 @@ import {
   StageOutcome,
   BankSMS,
   VerificationDecision,
+  RejectionCategory,
 } from '../src/types/payment.js';
 
 export interface VerifySlipRequest {
@@ -17,6 +18,19 @@ export interface VerifySlipRequest {
 
 /**
  * Executes the 4-Stage Auto-Verification & Fraud Pipeline
+ * Covers all 12 operational scenarios:
+ * 1. Normal payment
+ * 2. Wrong amount (under/over)
+ * 3. Wrong account
+ * 4. Duplicate payment (exact image)
+ * 5. Reused payment (another customer)
+ * 6. Same payment, different image (different crop/screenshot)
+ * 7. Old payment (stale date)
+ * 8. Edited or suspicious slip (tamper)
+ * 9. Unclear image (blurry/dark)
+ * 10. Conflicting evidence (slip contradicts bank feed)
+ * 11. Missing evidence (no bank settlement yet)
+ * 12. Multiple customers with similar payments (anti-false-attribution)
  */
 export async function executeVerificationPipeline(request: VerifySlipRequest): Promise<Submission> {
   const { orderId, imageDataUri } = request;
@@ -41,7 +55,7 @@ export async function executeVerificationPipeline(request: VerifySlipRequest): P
     const stage1Duration = Math.round(performance.now() - stage1Start);
     stages.push({
       stage: 1,
-      name: 'Zero-Cost Deduplication & State Check',
+      name: 'Zero-Cost Deduplication & Pre-Check',
       status: 'FAILED',
       summary: `Order ${orderId} has already been approved and settled.`,
       executionTimeMs: stage1Duration,
@@ -53,7 +67,7 @@ export async function executeVerificationPipeline(request: VerifySlipRequest): P
       orderId,
       decision: 'REJECTED',
       confidenceScore: 100,
-      rejectionCategory: 'DUPLICATE_IMAGE',
+      rejectionCategory: 'DUPLICATE_PAYMENT',
       rejectionReason: 'This order has already been finalized and approved.',
       customerMessage: 'This order is already marked as paid. If you need assistance, please contact support.',
       internalNote: 'Repeated slip upload blocked for already settled order.',
@@ -84,7 +98,7 @@ export async function executeVerificationPipeline(request: VerifySlipRequest): P
     return submission;
   }
 
-  // Check duplicate image hash in registry
+  // Check 1: Duplicate payment (Exact same slip submitted more than once)
   const dupCheck = db.checkDuplicateHash(imageHash);
   if (dupCheck.isDuplicate) {
     const stage1Duration = Math.round(performance.now() - stage1Start);
@@ -97,7 +111,6 @@ export async function executeVerificationPipeline(request: VerifySlipRequest): P
       details: { imageHash, matchedOrderId: dupCheck.previous?.orderId, zeroAiCost: true },
     });
 
-    // Skip stages 2, 3, 4
     stages.push(
       { stage: 2, name: 'Multimodal Extraction (Gemini)', status: 'SKIPPED', summary: 'Skipped: Deduplication pre-check failed (0 AI tokens spent)', executionTimeMs: 0, details: {} },
       { stage: 3, name: 'Fraud & Rule Engine', status: 'SKIPPED', summary: 'Skipped: Early exit at Stage 1', executionTimeMs: 0, details: {} },
@@ -109,10 +122,10 @@ export async function executeVerificationPipeline(request: VerifySlipRequest): P
       orderId,
       decision: 'REJECTED',
       confidenceScore: 100,
-      rejectionCategory: 'DUPLICATE_IMAGE',
+      rejectionCategory: 'DUPLICATE_PAYMENT',
       rejectionReason: `Exact image hash matches slip previously used for ${dupCheck.previous?.orderId}.`,
       customerMessage: 'This payment slip has already been submitted for another transaction. Please upload your unique transfer confirmation.',
-      internalNote: `Fraud Alert: Reused slip image hash. Pre-check blocked processing with zero Gemini API overhead.`,
+      internalNote: `Duplicate payment alert: Reused exact slip image hash. Pre-check blocked processing with zero Gemini API overhead.`,
       stages,
       createdAt: submittedAt,
       imageHash,
@@ -132,7 +145,7 @@ export async function executeVerificationPipeline(request: VerifySlipRequest): P
     db.saveSubmission(submission);
     db.addAuditLog(
       'Pipeline Stage 1',
-      'REJECT_DUPLICATE_HASH',
+      'REJECT_DUPLICATE_PAYMENT',
       orderId,
       `Exact SHA-256 match found in registry (${imageHash.slice(0, 12)}...). 0 AI tokens consumed.`,
       submissionId
@@ -152,7 +165,7 @@ export async function executeVerificationPipeline(request: VerifySlipRequest): P
   });
 
   // ----------------------------------------------------
-  // Stage 2: Multimodal Extraction (Gemini)
+  // Stage 2: Multimodal Extraction (Gemini 3.8 Flash)
   // ----------------------------------------------------
   const stage2Start = performance.now();
   const extraction = await extractSlipWithGemini(imageDataUri, {
@@ -162,12 +175,15 @@ export async function executeVerificationPipeline(request: VerifySlipRequest): P
   });
   const stage2Duration = Math.round(performance.now() - stage2Start);
 
-  if (!extraction.isLegible || extraction.confidence < 0.35) {
+  // Check 9: Unclear image (Blurry, cropped, dark, or low-resolution)
+  // NOTE: In banking operations, an unclear image is UNCERTAINTY, not malice.
+  // We classify as NEEDS_VERIFICATION with an actionable customer resubmission prompt!
+  if (!extraction.isLegible || extraction.confidence < 0.40 || extraction.isCroppedOrDark) {
     stages.push({
       stage: 2,
       name: 'Multimodal Extraction (Gemini)',
-      status: 'FAILED',
-      summary: 'Slip is unreadable or severely blurred. Low extraction confidence.',
+      status: 'PENDING',
+      summary: 'Slip is unreadable, dark, or severely blurred. Low extraction confidence.',
       executionTimeMs: stage2Duration,
       details: { confidence: extraction.confidence, isLegible: extraction.isLegible, model: extraction.modelUsed },
     });
@@ -179,12 +195,12 @@ export async function executeVerificationPipeline(request: VerifySlipRequest): P
     const result: VerificationResult = {
       submissionId,
       orderId,
-      decision: 'REJECTED',
+      decision: 'NEEDS_VERIFICATION',
       confidenceScore: Math.round(extraction.confidence * 100),
-      rejectionCategory: 'ILLEGIBLE_SLIP',
-      rejectionReason: 'Slip is illegible or optical blur exceeds threshold.',
-      customerMessage: 'We could not clearly read the details on your payment slip. Please upload a clear, focused photo or screenshot.',
-      internalNote: `Gemini OCR flagged slip as illegible (Confidence: ${Math.round(extraction.confidence * 100)}%).`,
+      rejectionCategory: 'UNCLEAR_IMAGE',
+      rejectionReason: 'Slip is blurry, dark, cropped, or optical quality is insufficient for verification.',
+      customerMessage: 'The photo of your payment slip appears blurry, dark, or cropped. Please upload a clear, focused screenshot directly from your mobile banking app.',
+      internalNote: `Image quality check: Gemini OCR confidence (${Math.round(extraction.confidence * 100)}%) below threshold. Queued for clearer resubmission.`,
       stages,
       extraction,
       createdAt: submittedAt,
@@ -197,13 +213,14 @@ export async function executeVerificationPipeline(request: VerifySlipRequest): P
       orderId,
       imageUrl: imageDataUri,
       imageHash,
-      status: 'REJECTED',
+      status: 'NEEDS_VERIFICATION',
       verification: result,
       submittedAt,
     };
 
     db.saveSubmission(submission);
-    db.addAuditLog('Pipeline Stage 2', 'REJECT_ILLEGIBLE', orderId, 'Extraction failed due to blur or illegibility.', submissionId);
+    db.updateOrder(order.id, { status: 'NEEDS_VERIFICATION', submissionId });
+    db.addAuditLog('Pipeline Stage 2', 'UNCLEAR_IMAGE_REQUEST_RESUBMIT', orderId, 'Extraction low confidence due to blur/lighting.', submissionId);
     return submission;
   }
 
@@ -228,20 +245,20 @@ export async function executeVerificationPipeline(request: VerifySlipRequest): P
   const stage3Start = performance.now();
   let stage3Passed = true;
   let stage3FailureReason = '';
-  let stage3Category: VerificationResult['rejectionCategory'] | undefined;
+  let stage3Category: RejectionCategory | undefined;
   let customerMsg = '';
   let internalNote = '';
 
-  // 3.1 Digital Tamper Check
+  // Check 8: Edited or suspicious slip (Manipulated amount, date, reference, or accounts)
   if (extraction.tamperScore >= db.merchantConfig.tamperScoreThreshold) {
     stage3Passed = false;
-    stage3Category = 'TAMPERED_SLIP';
+    stage3Category = 'EDITED_SLIP';
     stage3FailureReason = `Forensic anomaly: Suspected digital manipulation (Score: ${(extraction.tamperScore * 100).toFixed(0)}%).`;
     customerMsg = 'Document verification failed: Visual inconsistencies or digital alterations detected on the payment slip. Please upload an original receipt.';
-    internalNote = `Tamper Alert: Reasons: ${extraction.tamperReasons.join(', ') || 'Font / pixel border artifacts'}`;
+    internalNote = `Edited / Suspicious Slip Alert: ${extraction.tamperReasons.join(', ') || 'Font kerning or pixel border artifacts'}`;
   }
 
-  // 3.2 Receiving Account Check
+  // Check 3: Wrong account (Payment made to an account that does not belong to the business)
   if (stage3Passed) {
     const slipAccClean = extraction.recipientAccount.replace(/[\s\-\.]/g, '');
     const merchantAccClean = order.targetAccount.replace(/[\s\-\.]/g, '');
@@ -257,52 +274,70 @@ export async function executeVerificationPipeline(request: VerifySlipRequest): P
 
     if (!isMatch) {
       stage3Passed = false;
-      stage3Category = 'ACCOUNT_MISMATCH';
-      stage3FailureReason = `Recipient account mismatch. Slip sent to ...${slipSuffix || slipAccClean}, expected ...${merchantSuffix}.`;
-      customerMsg = `The transfer was sent to an unrecognized receiving account (...${slipSuffix || 'unknown'}), which does not match our merchant account.`;
-      internalNote = `Wrong recipient account: Slip specifies '${extraction.recipientAccount}', merchant expects '${order.targetAccount}'.`;
+      stage3Category = 'WRONG_ACCOUNT';
+      stage3FailureReason = `Wrong recipient account. Slip sent to ...${slipSuffix || slipAccClean}, expected business account ...${merchantSuffix}.`;
+      customerMsg = `The payment was made to an account (...${slipSuffix || 'unknown'}) that does not belong to our business. Please verify the beneficiary details.`;
+      internalNote = `Wrong Account: Slip specifies recipient '${extraction.recipientAccount}', merchant expects '${order.targetAccount}'.`;
     }
   }
 
-  // 3.3 Amount Match
+  // Check 2: Wrong amount (The customer paid less or more than the required amount)
   if (stage3Passed) {
     const diff = Math.abs(extraction.amount - order.amount);
     const isAmountValid = db.merchantConfig.allowMinorCentsRounding ? diff < 0.1 : diff < 0.01;
 
     if (!isAmountValid) {
       stage3Passed = false;
-      stage3Category = 'AMOUNT_MISMATCH';
-      stage3FailureReason = `Amount mismatch: Slip shows ${extraction.amount} ${extraction.currency}, order total is ${order.amount} ${order.currency}.`;
-      customerMsg = `The transfer amount of ${extraction.amount.toFixed(2)} ${extraction.currency} does not match the required total of ${order.amount.toFixed(2)} ${order.currency}.`;
-      internalNote = `Under/Over payment detected. Slip: ${extraction.amount}, Order: ${order.amount}, Diff: ${(extraction.amount - order.amount).toFixed(2)}`;
+      stage3Category = 'WRONG_AMOUNT';
+      const isUnderpayment = extraction.amount < order.amount;
+      const delta = Math.abs(order.amount - extraction.amount);
+
+      if (isUnderpayment) {
+        stage3FailureReason = `Underpayment: Slip shows ${extraction.amount.toFixed(2)} ${extraction.currency}, required order total is ${order.amount.toFixed(2)} ${order.currency}. Shortfall: ${delta.toFixed(2)} ${order.currency}.`;
+        customerMsg = `Underpayment detected: You paid ${extraction.amount.toFixed(2)} ${extraction.currency}, but the order total is ${order.amount.toFixed(2)} ${order.currency}. Please settle the remaining ${delta.toFixed(2)} ${order.currency}.`;
+      } else {
+        stage3FailureReason = `Overpayment: Slip shows ${extraction.amount.toFixed(2)} ${extraction.currency}, required order total is ${order.amount.toFixed(2)} ${order.currency}. Excess: ${delta.toFixed(2)} ${order.currency}.`;
+        customerMsg = `Overpayment detected: You transferred ${extraction.amount.toFixed(2)} ${extraction.currency}, which exceeds the required order total of ${order.amount.toFixed(2)} ${order.currency}. Please contact support for assistance.`;
+      }
+      internalNote = `Amount Mismatch: Slip ${extraction.amount}, Order ${order.amount}, Delta: ${(extraction.amount - order.amount).toFixed(2)}`;
     }
   }
 
-  // 3.4 Reused Reference Check
+  // Check 6 & 5: Same payment, different image VS Reused payment
   if (stage3Passed) {
-    const refCheck = db.checkDuplicateReference(extraction.referenceNumber, order.id);
-    if (refCheck.isDuplicate) {
+    const refUsage = db.checkReferenceUsage(extraction.referenceNumber, order.id, imageHash);
+    if (refUsage.isClaimed && refUsage.previous) {
       stage3Passed = false;
-      stage3Category = 'REUSED_REFERENCE';
-      stage3FailureReason = `Reference number #${extraction.referenceNumber} has already been registered on order ${refCheck.previous?.orderId}.`;
-      customerMsg = `Transaction reference #${extraction.referenceNumber} has already been recorded in our system. Please check your bank transaction.`;
-      internalNote = `Fraud flag: Reference code collision with existing order ${refCheck.previous?.orderId}.`;
+
+      if (refUsage.isReusedPayment) {
+        // Check 5: Reused payment (A genuine payment is submitted for another customer's order)
+        stage3Category = 'REUSED_PAYMENT';
+        stage3FailureReason = `Reused payment: Transaction reference #${extraction.referenceNumber} was already credited to order ${refUsage.previous.orderId}.`;
+        customerMsg = `This payment transaction (Ref #${extraction.referenceNumber}) has already been credited to another customer's order. Each transfer can only be used once.`;
+        internalNote = `Reused payment alert: Customer submitted genuine payment previously claimed by order ${refUsage.previous.orderId}.`;
+      } else if (refUsage.isSamePaymentDifferentImage) {
+        // Check 6: Same payment, different image (The same transaction is submitted as different screenshots/photos/crops)
+        stage3Category = 'SAME_PAYMENT_DIFFERENT_IMAGE';
+        stage3FailureReason = `Same transaction submitted as a different image/crop. Reference #${extraction.referenceNumber} was already recorded under hash ${refUsage.previous.imageHash.slice(0, 8)}...`;
+        customerMsg = `This transaction (Reference #${extraction.referenceNumber}) has already been processed using a different receipt image.`;
+        internalNote = `Same payment different image: SHA-256 differed due to cropping/recapture, but transaction reference #${extraction.referenceNumber} collision confirmed.`;
+      }
     }
   }
 
-  // 3.5 Stale / Future Date Check
+  // Check 7: Old payment (A genuine payment from a previous transaction is submitted for a new order)
   if (stage3Passed) {
     const slipDate = new Date(extraction.transferDateTime);
     const orderDate = new Date(order.createdAt);
     if (!isNaN(slipDate.getTime())) {
-      const minutesDiff = (orderDate.getTime() - slipDate.getTime()) / (1000 * 60);
-      // If slip is older than allowed stale window (e.g. 24 hours prior to order)
-      if (minutesDiff > db.merchantConfig.staleMinutesThreshold) {
+      const hoursDiff = (orderDate.getTime() - slipDate.getTime()) / (1000 * 60 * 60);
+      // If slip timestamp is older than merchant configured window (e.g., > 24 hours prior)
+      if (hoursDiff > db.merchantConfig.staleMinutesThreshold / 60) {
         stage3Passed = false;
-        stage3Category = 'STALE_DATE';
-        stage3FailureReason = `Transaction date (${slipDate.toLocaleDateString()}) is stale compared to order date (${orderDate.toLocaleDateString()}).`;
-        customerMsg = 'The payment slip timestamp predates this order by over 24 hours. Please submit a current transfer receipt.';
-        internalNote = `Stale slip: Transfer timestamp is ${Math.round(minutesDiff / 60)} hours older than order.`;
+        stage3Category = 'OLD_PAYMENT';
+        stage3FailureReason = `Old payment: Transaction date (${slipDate.toLocaleDateString()}) predates order (${orderDate.toLocaleDateString()}) by ${Math.round(hoursDiff)} hours.`;
+        customerMsg = `The payment receipt is from a past transaction dated ${slipDate.toLocaleDateString()}, but this order was placed on ${orderDate.toLocaleDateString()}. Please submit a current transfer receipt.`;
+        internalNote = `Old payment alert: Transfer timestamp is ${Math.round(hoursDiff)} hours older than order creation.`;
       }
     }
   }
@@ -386,22 +421,116 @@ export async function executeVerificationPipeline(request: VerifySlipRequest): P
   const targetAccountClean = order.targetAccount.replace(/[\s\-\.]/g, '');
   const targetSuffix = targetAccountClean.slice(-4);
 
+  // Check 10: Conflicting evidence (Slip extracted details contradict bank SMS feed)
+  const conflictCheck = db.findConflictingEvidence(
+    extraction.referenceNumber,
+    extraction.amount,
+    extraction.currency
+  );
+  if (conflictCheck.hasConflict) {
+    const stage4Duration = Math.round(performance.now() - stage4Start);
+    stages.push({
+      stage: 4,
+      name: 'Bank SMS Cross-Reconciliation',
+      status: 'FAILED',
+      summary: conflictCheck.reason || 'Conflicting evidence between slip and bank settlement data.',
+      executionTimeMs: stage4Duration,
+      details: { conflict: conflictCheck.reason },
+    });
+
+    const result: VerificationResult = {
+      submissionId,
+      orderId,
+      decision: 'REJECTED',
+      confidenceScore: 98,
+      rejectionCategory: 'CONFLICTING_EVIDENCE',
+      rejectionReason: conflictCheck.reason,
+      customerMessage: 'Information extracted from your payment slip directly conflicts with our bank settlement records. Please contact billing support.',
+      internalNote: `Conflicting Evidence: ${conflictCheck.reason}`,
+      stages,
+      extraction,
+      createdAt: submittedAt,
+      imageHash,
+      perceptualHash: perceptualSig,
+    };
+
+    const submission: Submission = {
+      id: submissionId,
+      orderId,
+      imageUrl: imageDataUri,
+      imageHash,
+      status: 'REJECTED',
+      verification: result,
+      submittedAt,
+    };
+
+    db.saveSubmission(submission);
+    db.addAuditLog('Pipeline Stage 4', 'REJECT_CONFLICTING_EVIDENCE', orderId, conflictCheck.reason || '', submissionId);
+    return submission;
+  }
+
+  // Check 12: Multiple customers with similar payments & Anti-False-Attribution
   const smsMatchResult = db.findMatchingSms(
     order.amount,
     order.currency,
     targetSuffix,
     extraction.referenceNumber,
-    order.id
+    order.id,
+    order.customerName || extraction.senderName
   );
 
   const stage4Duration = Math.round(performance.now() - stage4Start);
 
-  let decision: VerificationDecision = 'APPROVED';
-  let matchedSms: BankSMS | undefined = undefined;
+  // Case 12: Multiple customers with similar payments (Avoid assuming matching amount alone proves ownership!)
+  if (smsMatchResult.isAmbiguous) {
+    stages.push({
+      stage: 4,
+      name: 'Bank SMS Cross-Reconciliation',
+      status: 'PENDING',
+      summary: `Ambiguous Payment: Multiple concurrent customers expecting ${order.amount} ${order.currency}. Matching amounts alone cannot prove ownership.`,
+      executionTimeMs: stage4Duration,
+      details: {
+        competingOrders: smsMatchResult.competingOrders,
+        antiFalseAttributionTriggered: true,
+      },
+    });
 
+    const result: VerificationResult = {
+      submissionId,
+      orderId,
+      decision: 'NEEDS_VERIFICATION',
+      confidenceScore: 68,
+      rejectionCategory: 'AMBIGUOUS_SIMILAR_PAYMENTS',
+      rejectionReason: `Multiple customers placed identical orders for ${order.amount} ${order.currency}. Reference or sender disambiguation required.`,
+      customerMessage: 'We detected multiple identical payments around this time. For your security, our team is verifying your specific transaction reference before activating your order.',
+      internalNote: `Multi-Customer Ambiguity: Orders (${smsMatchResult.competingOrders?.join(', ')}) share identical ${order.amount} ${order.currency}. Bank SMS lacks unique reference or sender match; auto-attribution blocked to prevent wrongful credit.`,
+      stages,
+      extraction,
+      createdAt: submittedAt,
+      imageHash,
+      perceptualHash: perceptualSig,
+      disambiguationRequired: true,
+      competingOrders: smsMatchResult.competingOrders,
+    };
+
+    const submission: Submission = {
+      id: submissionId,
+      orderId,
+      imageUrl: imageDataUri,
+      imageHash,
+      status: 'NEEDS_VERIFICATION',
+      verification: result,
+      submittedAt,
+    };
+
+    db.saveSubmission(submission);
+    db.updateOrder(order.id, { status: 'NEEDS_VERIFICATION', submissionId });
+    db.addAuditLog('Pipeline Stage 4', 'AMBIGUOUS_SIMILAR_PAYMENTS', orderId, 'Amount-only match blocked due to concurrent identical customer orders.', submissionId);
+    return submission;
+  }
+
+  // Already claimed by another order conflict
   if (smsMatchResult.conflictReason) {
-    // There is an SMS conflict (e.g. claimed already)
-    decision = 'REJECTED';
     stages.push({
       stage: 4,
       name: 'Bank SMS Cross-Reconciliation',
@@ -442,9 +571,9 @@ export async function executeVerificationPipeline(request: VerifySlipRequest): P
     return submission;
   }
 
+  // Check 1: Normal payment (A genuine payment with matching information)
   if (smsMatchResult.matched) {
-    // Direct bank SMS match found!
-    matchedSms = smsMatchResult.matched;
+    const matchedSms = smsMatchResult.matched;
     db.claimBankSms(matchedSms.id, order.id, submissionId);
 
     stages.push({
@@ -466,8 +595,9 @@ export async function executeVerificationPipeline(request: VerifySlipRequest): P
       orderId,
       decision: 'APPROVED',
       confidenceScore: 99,
+      rejectionCategory: 'NORMAL_PAYMENT',
       customerMessage: 'Payment verified successfully against live bank settlement records. Your order is confirmed!',
-      internalNote: `Fully verified across all 4 stages. Linked to SMS ID ${matchedSms.id}.`,
+      internalNote: `Normal payment confirmed across all 4 stages. Linked to SMS ID ${matchedSms.id}.`,
       stages,
       extraction,
       matchedSmsId: matchedSms.id,
@@ -504,14 +634,12 @@ export async function executeVerificationPipeline(request: VerifySlipRequest): P
     return submission;
   }
 
-  // If no matching SMS is in the feed yet, but Stages 1-3 were completely valid:
-  // It enters "NEEDS_VERIFICATION" (awaiting bank feed confirmation)
-  decision = 'NEEDS_VERIFICATION';
+  // Check 11: Missing evidence (System cannot confidently establish payment occurred yet)
   stages.push({
     stage: 4,
     name: 'Bank SMS Cross-Reconciliation',
     status: 'PENDING',
-    summary: 'Slip valid. Pending credit confirmation in bank SMS feed.',
+    summary: 'Missing evidence: Slip valid, but no matching credit record exists in current bank feed.',
     executionTimeMs: stage4Duration,
     details: {
       waitingForSms: true,
@@ -524,9 +652,10 @@ export async function executeVerificationPipeline(request: VerifySlipRequest): P
     submissionId,
     orderId,
     decision: 'NEEDS_VERIFICATION',
-    confidenceScore: 82,
+    confidenceScore: 78,
+    rejectionCategory: 'MISSING_EVIDENCE',
     customerMessage: 'Payment slip parsed and verified. We are awaiting confirmation from the bank settlement feed; your order will update shortly.',
-    internalNote: 'Slip passed Stages 1, 2, and 3. No matching Bank SMS found in current feed. Queued for live auto-reconciliation or staff manual review.',
+    internalNote: 'Missing settlement evidence: Stages 1-3 passed, but matching Bank SMS is not yet present in bank feed. Listening for gateway credit.',
     stages,
     extraction,
     createdAt: submittedAt,
@@ -554,7 +683,7 @@ export async function executeVerificationPipeline(request: VerifySlipRequest): P
     'Pipeline Stage 4',
     'STATUS_NEEDS_VERIFICATION',
     orderId,
-    'Slip verified. Awaiting bank SMS feed credit or manual staff override.',
+    'Missing evidence: Slip verified. Awaiting bank SMS feed credit or manual staff override.',
     submissionId
   );
 
@@ -563,7 +692,8 @@ export async function executeVerificationPipeline(request: VerifySlipRequest): P
 
 /**
  * Triggered when a new Bank SMS is ingested or simulated.
- * Scans all pending submissions with 'NEEDS_VERIFICATION' and attempts auto-reconciliation.
+ * Scans all pending submissions with 'NEEDS_VERIFICATION' and attempts auto-reconciliation,
+ * respecting multi-customer disambiguation rules.
  */
 export function reconcilePendingOrdersWithNewSms(newSms: BankSMS): Array<{ orderId: string; submissionId: string }> {
   const reconciled: Array<{ orderId: string; submissionId: string }> = [];
@@ -586,21 +716,28 @@ export function reconcilePendingOrdersWithNewSms(newSms: BankSMS): Array<{ order
     const isRefMatch =
       slipRef && newSms.parsedRef && slipRef.toLowerCase() === newSms.parsedRef.toLowerCase();
 
+    // Check multi-customer ambiguity on incoming feed
+    if (isAmountMatch && !isRefMatch && db.merchantConfig.enforceMultiCustomerDisambiguation) {
+      const similarOrders = db.findSimilarPendingOrders(order.amount, order.id);
+      if (similarOrders.length > 0) {
+        // Without explicit reference or sender corroboration, do not auto-claim to prevent wrongful credit!
+        continue;
+      }
+    }
+
     if (isAmountMatch && (isAccMatch || isRefMatch)) {
-      // Claim SMS
       const claimed = db.claimBankSms(newSms.id, order.id, sub.id);
       if (!claimed) continue;
 
-      // Update submission
       sub.status = 'APPROVED';
       sub.verification.decision = 'APPROVED';
       sub.verification.confidenceScore = 99;
+      sub.verification.rejectionCategory = 'NORMAL_PAYMENT';
       sub.verification.matchedSmsId = newSms.id;
       sub.verification.matchedSms = newSms;
       sub.verification.customerMessage = 'Payment confirmed! Bank SMS credit notification received and matched.';
       sub.verification.internalNote = `Auto-reconciled on arrival of Bank SMS ${newSms.id}. Order marked APPROVED.`;
 
-      // Update Stage 4 outcome
       const stage4 = sub.verification.stages.find((s) => s.stage === 4);
       if (stage4) {
         stage4.status = 'PASSED';
@@ -629,7 +766,7 @@ export function reconcilePendingOrdersWithNewSms(newSms: BankSMS): Array<{ order
       );
 
       reconciled.push({ orderId: order.id, submissionId: sub.id });
-      break; // Each SMS can claim at most one order
+      break;
     }
   }
 

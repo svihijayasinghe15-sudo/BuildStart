@@ -2,8 +2,8 @@ import React from 'react';
 import { ShieldCheck, MessageSquarePlus, RotateCcw, Activity } from 'lucide-react';
 
 interface TopBarProps {
-  activeTab: 'workbench' | 'submissions' | 'sms' | 'scenarios' | 'audit' | 'config';
-  setActiveTab: (tab: 'workbench' | 'submissions' | 'sms' | 'scenarios' | 'audit' | 'config') => void;
+  activeTab: 'workbench' | 'submissions' | 'sms' | 'scenarios' | 'audit' | 'config' | 'report';
+  setActiveTab: (tab: 'workbench' | 'submissions' | 'sms' | 'scenarios' | 'audit' | 'config' | 'report') => void;
   onOpenSmsSimulator: () => void;
   onResetData: () => void;
   pendingCount: number;
@@ -102,6 +102,16 @@ export const TopBar: React.FC<TopBarProps> = ({
             }`}
           >
             Settings
+          </button>
+          <button
+            onClick={() => setActiveTab('report')}
+            className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${
+              activeTab === 'report'
+                ? 'bg-cyan-950/80 text-cyan-300 border border-cyan-800/60 shadow-sm'
+                : 'text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            System Report
           </button>
         </nav>
 

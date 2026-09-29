@@ -1,13 +1,18 @@
 export type VerificationDecision = 'APPROVED' | 'REJECTED' | 'NEEDS_VERIFICATION';
 
 export type RejectionCategory =
-  | 'DUPLICATE_IMAGE'
-  | 'ILLEGIBLE_SLIP'
-  | 'TAMPERED_SLIP'
-  | 'AMOUNT_MISMATCH'
-  | 'ACCOUNT_MISMATCH'
-  | 'REUSED_REFERENCE'
-  | 'STALE_DATE'
+  | 'NORMAL_PAYMENT'
+  | 'WRONG_AMOUNT'
+  | 'WRONG_ACCOUNT'
+  | 'DUPLICATE_PAYMENT'
+  | 'REUSED_PAYMENT'
+  | 'SAME_PAYMENT_DIFFERENT_IMAGE'
+  | 'OLD_PAYMENT'
+  | 'EDITED_SLIP'
+  | 'UNCLEAR_IMAGE'
+  | 'CONFLICTING_EVIDENCE'
+  | 'MISSING_EVIDENCE'
+  | 'AMBIGUOUS_SIMILAR_PAYMENTS'
   | 'CLAIM_CONFLICT';
 
 export interface Order {
@@ -51,6 +56,7 @@ export interface SlipExtraction {
   recipientAccount: string;
   referenceNumber: string;
   isLegible: boolean;
+  isCroppedOrDark?: boolean;
   tamperScore: number; // 0.0 (pristine) to 1.0 (heavily edited)
   tamperReasons: string[];
   confidence: number;
@@ -83,6 +89,8 @@ export interface VerificationResult {
   createdAt: string;
   imageHash: string;
   perceptualHash?: string;
+  disambiguationRequired?: boolean;
+  competingOrders?: string[];
 }
 
 export interface Submission {
@@ -124,15 +132,17 @@ export interface MerchantConfig {
   tamperScoreThreshold: number; // default 0.40
   staleMinutesThreshold: number; // default 1440 (24h)
   allowMinorCentsRounding: boolean;
+  enforceMultiCustomerDisambiguation: boolean; // avoid matching amounts alone
 }
 
 export interface TestScenario {
   id: string;
   title: string;
+  situation: string; // The specific situation from the 12 requirements
   category: string;
   description: string;
   expectedDecision: VerificationDecision;
-  expectedRejectionCategory?: RejectionCategory;
+  expectedCategory: RejectionCategory;
   expectedStageFailure?: number;
   orderId: string;
   slipDescription: string;

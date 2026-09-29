@@ -86,29 +86,77 @@ export const Workbench: React.FC<WorkbenchProps> = ({
     }
   };
 
-  // Helper for status colors
-  const getDecisionBadge = (decision: string) => {
-    switch (decision) {
-      case 'APPROVED':
+  // Helper for status colors and operational situation labels
+  const getDecisionBadge = (decision: string, category?: string) => {
+    if (decision === 'APPROVED') {
+      return {
+        bg: 'bg-emerald-950/40 border-emerald-500/40 text-emerald-300',
+        icon: <CheckCircle2 className="h-4 w-4 text-emerald-400" />,
+        label: 'APPROVED: Normal Payment Reconciled',
+      };
+    }
+
+    if (decision === 'NEEDS_VERIFICATION') {
+      if (category === 'AMBIGUOUS_SIMILAR_PAYMENTS') {
         return {
-          bg: 'bg-emerald-950/40 border-emerald-500/40 text-emerald-300',
-          icon: <CheckCircle2 className="h-4 w-4 text-emerald-400" />,
-          label: 'APPROVED',
+          bg: 'bg-amber-950/40 border-amber-500/40 text-amber-300',
+          icon: <AlertTriangle className="h-4 w-4 text-amber-400" />,
+          label: 'NEEDS VERIFICATION: Ambiguous Similar Payments (Anti-False-Attribution)',
         };
-      case 'NEEDS_VERIFICATION':
+      }
+      if (category === 'UNCLEAR_IMAGE') {
         return {
           bg: 'bg-amber-950/40 border-amber-500/40 text-amber-300',
           icon: <Clock className="h-4 w-4 text-amber-400" />,
-          label: 'NEEDS VERIFICATION (Pending Bank Feed)',
+          label: 'NEEDS VERIFICATION: Unclear Receipt (Resubmission Requested)',
         };
-      case 'REJECTED':
-      default:
-        return {
-          bg: 'bg-rose-950/40 border-rose-500/40 text-rose-300',
-          icon: <XCircle className="h-4 w-4 text-rose-400" />,
-          label: 'REJECTED (Fraud / Rule Flagged)',
-        };
+      }
+      return {
+        bg: 'bg-amber-950/40 border-amber-500/40 text-amber-300',
+        icon: <Clock className="h-4 w-4 text-amber-400" />,
+        label: 'NEEDS VERIFICATION: Missing Settlement Evidence in Feed',
+      };
     }
+
+    // Rejection sub-types
+    let label = 'REJECTED';
+    switch (category) {
+      case 'WRONG_AMOUNT':
+        label = 'REJECTED: Wrong Amount (Discrepancy Detected)';
+        break;
+      case 'WRONG_ACCOUNT':
+        label = 'REJECTED: Wrong Account (Non-Business Destination)';
+        break;
+      case 'DUPLICATE_PAYMENT':
+        label = 'REJECTED: Duplicate Payment (Exact Slip Re-submission - 0 Tokens)';
+        break;
+      case 'REUSED_PAYMENT':
+        label = 'REJECTED: Reused Payment (Claimed on Another Order)';
+        break;
+      case 'SAME_PAYMENT_DIFFERENT_IMAGE':
+        label = 'REJECTED: Same Payment, Different Image / Crop';
+        break;
+      case 'OLD_PAYMENT':
+        label = 'REJECTED: Old Past Transaction (Stale Timestamp)';
+        break;
+      case 'EDITED_SLIP':
+        label = 'REJECTED: Edited or Suspicious Slip (Forensic Tamper Flagged)';
+        break;
+      case 'CONFLICTING_EVIDENCE':
+        label = 'REJECTED: Conflicting Evidence (Slip Contradicts Bank SMS)';
+        break;
+      case 'CLAIM_CONFLICT':
+        label = 'REJECTED: Conflicting SMS Claim (Already Consumed)';
+        break;
+      default:
+        label = 'REJECTED: Fraud or Rule Verification Flagged';
+    }
+
+    return {
+      bg: 'bg-rose-950/40 border-rose-500/40 text-rose-300',
+      icon: <XCircle className="h-4 w-4 text-rose-400" />,
+      label,
+    };
   };
 
   return (
@@ -190,18 +238,24 @@ export const Workbench: React.FC<WorkbenchProps> = ({
 
             {/* Fast Presets from Scenarios */}
             <div className="mt-5 border-t border-slate-800 pt-4">
-              <label className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider block mb-2">
-                1-Click Preset Test Slips:
-              </label>
-              <div className="grid grid-cols-2 gap-1.5">
-                {scenarios.slice(0, 6).map((sc) => (
+              <div className="flex items-center justify-between mb-2">
+                <label className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider block">
+                  1-Click Presets (12 Situations):
+                </label>
+                <span className="text-[10px] text-cyan-400 font-mono">12 Scenarios</span>
+              </div>
+              <div className="grid grid-cols-2 gap-1.5 max-h-56 overflow-y-auto pr-1">
+                {scenarios.map((sc) => (
                   <button
                     key={sc.id}
                     onClick={() => handleSelectScenario(sc)}
                     className="p-1.5 rounded border border-slate-800 bg-slate-950 hover:border-cyan-500/50 hover:bg-slate-800/80 transition-colors text-left"
                   >
                     <div className="text-[11px] font-medium text-slate-200 truncate">{sc.title}</div>
-                    <div className="text-[10px] text-slate-500 font-mono">{sc.expectedDecision}</div>
+                    <div className="text-[10px] text-slate-500 font-mono flex items-center justify-between">
+                      <span>{sc.expectedDecision}</span>
+                      <span className="text-[9px] text-cyan-400/80">{sc.situation.slice(0, 10)}</span>
+                    </div>
                   </button>
                 ))}
               </div>
@@ -424,7 +478,10 @@ export const Workbench: React.FC<WorkbenchProps> = ({
         <div className="rounded-xl border border-slate-800 bg-slate-900/90 p-5 shadow-lg space-y-5 animate-in fade-in slide-in-from-top-2 duration-200">
           {/* Decision Hero Banner */}
           {(() => {
-            const badge = getDecisionBadge(activeSubmission.status);
+            const badge = getDecisionBadge(
+              activeSubmission.status,
+              activeSubmission.verification.rejectionCategory
+            );
             return (
               <div
                 className={`flex flex-col sm:flex-row items-start sm:items-center justify-between rounded-lg border p-4 ${badge.bg}`}
@@ -521,8 +578,8 @@ export const Workbench: React.FC<WorkbenchProps> = ({
                       )}
                     </td>
                     <td className="py-2.5 px-3">
-                      {activeSubmission.verification.rejectionCategory === 'ACCOUNT_MISMATCH' ? (
-                        <span className="text-rose-400 font-mono text-[11px]">Account Mismatch</span>
+                      {activeSubmission.verification.rejectionCategory === 'WRONG_ACCOUNT' ? (
+                        <span className="text-rose-400 font-mono text-[11px]">Wrong Account</span>
                       ) : (
                         <span className="text-emerald-400 font-mono text-[11px]">Verified</span>
                       )}
@@ -539,8 +596,9 @@ export const Workbench: React.FC<WorkbenchProps> = ({
                       )}
                     </td>
                     <td className="py-2.5 px-3">
-                      {activeSubmission.verification.rejectionCategory === 'REUSED_REFERENCE' ? (
-                        <span className="text-rose-400 font-mono text-[11px]">Collision Detected</span>
+                      {activeSubmission.verification.rejectionCategory === 'REUSED_PAYMENT' ||
+                      activeSubmission.verification.rejectionCategory === 'SAME_PAYMENT_DIFFERENT_IMAGE' ? (
+                        <span className="text-rose-400 font-mono text-[11px]">Collision / Reused</span>
                       ) : (
                         <span className="text-emerald-400 font-mono text-[11px]">Unique Code</span>
                       )}

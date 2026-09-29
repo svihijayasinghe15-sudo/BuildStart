@@ -13,6 +13,8 @@ function createSvgSlipDataUrl(opts: {
   recipientAcc: string;
   isTampered?: boolean;
   isBlurry?: boolean;
+  isCropped?: boolean;
+  isDark?: boolean;
   tamperScore?: number;
   tamperReasons?: string[];
   isLegible?: boolean;
@@ -22,12 +24,16 @@ function createSvgSlipDataUrl(opts: {
     ? `<filter id="blur"><feGaussianBlur stdDeviation="7" /></filter>`
     : '';
   const filterAttr = opts.isBlurry ? `filter="url(#blur)"` : '';
+  const darkOverlay = opts.isDark
+    ? `<rect x="0" y="0" width="360" height="520" fill="#000000" opacity="0.65" />`
+    : '';
+  const viewBox = opts.isCropped ? 'viewBox="40 50 280 400"' : 'viewBox="0 0 360 520"';
 
   // Tamper artifact: if tampered, draw an obvious background box with different shade behind amount
   const tamperArtifacts = opts.isTampered
     ? `
     <rect x="70" y="240" width="220" height="48" fill="#e2e8f0" stroke="#94a3b8" stroke-dasharray="2,2" rx="4" />
-    <text x="75" y="235" font-family="monospace" font-size="9" fill="#dc2626">ANOMALY: FONT_MISMATCH</text>
+    <text x="75" y="235" font-family="monospace" font-size="9" fill="#dc2626">FORENSIC ANOMALY: FONT_KERNING_ALTERED</text>
     `
     : '';
 
@@ -35,7 +41,7 @@ function createSvgSlipDataUrl(opts: {
   const amountFont = opts.isTampered ? 'Courier New, monospace' : 'system-ui, sans-serif';
 
   const svg = `
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 520" width="360" height="520">
+<svg xmlns="http://www.w3.org/2000/svg" ${viewBox} width="360" height="520">
   <defs>
     ${blurFilter}
     <linearGradient id="bankGrad" x1="0%" y1="0%" x2="100%" y2="100%">
@@ -91,9 +97,11 @@ function createSvgSlipDataUrl(opts: {
     <!-- Watermark / Microprint -->
     <text x="180" y="485" font-family="sans-serif" font-size="9" fill="#94a3b8" text-anchor="middle">Official Bank Electronic Transaction · Verified e-Slip</text>
   </g>
+  ${darkOverlay}
 </svg>`.trim();
 
   // Synthetic metadata payload comment embedded for deterministic test engine verification
+  const isUnclear = Boolean(opts.isBlurry || opts.isCropped || opts.isDark || opts.isLegible === false);
   const metaPayload = {
     bankName: opts.bankName,
     amount: opts.amount,
@@ -104,34 +112,36 @@ function createSvgSlipDataUrl(opts: {
     recipientName: opts.recipientName,
     recipientAccount: opts.recipientAcc,
     referenceNumber: opts.refNumber,
-    isLegible: opts.isLegible ?? !opts.isBlurry,
+    isLegible: !isUnclear,
+    isCroppedOrDark: Boolean(opts.isCropped || opts.isDark),
     tamperScore: opts.tamperScore ?? (opts.isTampered ? 0.89 : 0.03),
     tamperReasons:
       opts.tamperReasons ??
       (opts.isTampered
-        ? ['Inconsistent font kerning on amount value', 'Bounding box compression artifacts detected around digits']
+        ? ['Inconsistent font kerning and weight on amount digits', 'Bounding box clone compression artifacts detected']
         : []),
-    confidence: opts.isBlurry ? 0.25 : 0.98,
-    rawNotes: opts.notes || 'Synthetic test slip',
+    confidence: isUnclear ? 0.28 : 0.98,
+    rawNotes: opts.notes || 'Synthetic test vector',
   };
 
   const encodedMeta = encodeURIComponent(JSON.stringify(metaPayload));
   const base64Svg = Buffer.from(svg).toString('base64');
 
-  // Embed marker in data URL
   return `data:image/svg+xml;base64,${base64Svg}#PAYVERIFY_META_START${encodedMeta}PAYVERIFY_META_END`;
 }
 
 export function getTestScenarios(): TestScenario[] {
   return [
     {
-      id: 'SCENARIO-01-PERFECT-MATCH',
-      title: '01. Legitimate Exact Match',
+      id: 'OP-01-NORMAL-PAYMENT',
+      title: '01. Normal Payment',
+      situation: 'Normal payment',
       category: 'Golden Path',
-      description: 'Customer transfers exact 150.00 THB to merchant account. Corresponding SCB SMS already present in bank feed. All 4 stages pass with 99% confidence.',
+      description: 'A genuine payment with matching information: Amount (150.00 THB), authorized business account, unedited slip, and matching bank SMS settlement.',
       expectedDecision: 'APPROVED',
+      expectedCategory: 'NORMAL_PAYMENT',
       orderId: 'ORD-8491',
-      slipDescription: 'Valid SCB slip: 150.00 THB to 042-8-91283-4, Ref SCB-2026-89102',
+      slipDescription: 'Authentic SCB transfer slip matching order ORD-8491 exactly',
       slipImageDataUrl: createSvgSlipDataUrl({
         bankName: 'Siam Commercial Bank',
         bankColor: '#4c1d95',
@@ -147,24 +157,147 @@ export function getTestScenarios(): TestScenario[] {
       simulatedSmsPreloaded: true,
     },
     {
-      id: 'SCENARIO-02-DUPLICATE-SLIP',
-      title: '02. Duplicate Slip (SHA-256 Pre-Check)',
-      category: 'Fraud Defense',
-      description: 'Attacker re-uploads an identical slip previously submitted and approved on another order. Engine detects duplicate SHA-256 hash in Stage 1 with 0 AI tokens spent.',
+      id: 'OP-02-WRONG-AMOUNT',
+      title: '02. Wrong Amount (Underpayment / Overpayment)',
+      situation: 'Wrong amount',
+      category: 'Rule Engine',
+      description: 'The customer paid less or more than the required amount. Order total is 890.00 THB, but customer slip shows only 500.00 THB (Shortfall: 390.00 THB).',
       expectedDecision: 'REJECTED',
-      expectedRejectionCategory: 'DUPLICATE_IMAGE',
+      expectedCategory: 'WRONG_AMOUNT',
+      expectedStageFailure: 3,
+      orderId: 'ORD-8492',
+      slipDescription: 'Slip with 500.00 THB transferred for an 890.00 THB order',
+      slipImageDataUrl: createSvgSlipDataUrl({
+        bankName: 'Kasikornbank',
+        bankColor: '#065f46',
+        amount: 500.0,
+        currency: 'THB',
+        refNumber: 'KBANK-2026-44102',
+        dateStr: '2026-09-28 14:10:00',
+        senderName: 'Ananya Tech Co.',
+        senderAcc: 'x-4190',
+        recipientName: 'PayVerify Cloud Services Ltd',
+        recipientAcc: '042-8-91283-4',
+      }),
+    },
+    {
+      id: 'OP-03-WRONG-ACCOUNT',
+      title: '03. Wrong Account',
+      situation: 'Wrong account',
+      category: 'Rule Engine',
+      description: 'The payment was made to an account that does not belong to the business (Customer transferred funds to personal account 819-2-99991-0).',
+      expectedDecision: 'REJECTED',
+      expectedCategory: 'WRONG_ACCOUNT',
+      expectedStageFailure: 3,
+      orderId: 'ORD-8493',
+      slipDescription: 'Slip sent to non-merchant personal account 819-2-99991-0',
+      slipImageDataUrl: createSvgSlipDataUrl({
+        bankName: 'Siam Commercial Bank',
+        bankColor: '#4c1d95',
+        amount: 250.0,
+        currency: 'THB',
+        refNumber: 'SCB-2026-99381',
+        dateStr: '2026-09-28 14:05:00',
+        senderName: 'Siriporn Miller',
+        senderAcc: 'x-7712',
+        recipientName: 'Mr. Non-Merchant Stranger',
+        recipientAcc: '819-2-99991-0',
+      }),
+    },
+    {
+      id: 'OP-04-DUPLICATE-PAYMENT',
+      title: '04. Duplicate Payment (Exact Slip Re-submission)',
+      situation: 'Duplicate payment',
+      category: 'Fraud Defense',
+      description: 'The same payment slip is submitted more than once. Stage 1 SHA-256 pre-check intercepts identical binary hash in under 2ms with 0 AI tokens spent.',
+      expectedDecision: 'REJECTED',
+      expectedCategory: 'DUPLICATE_PAYMENT',
       expectedStageFailure: 1,
       orderId: 'ORD-8492',
-      slipDescription: 'Re-uploading the approved receipt hash from previous order ORD-8490',
+      slipDescription: 'Exact re-upload of approved receipt hash from previous order ORD-8490',
       slipImageDataUrl: 'data:text/plain;base64,' + Buffer.from('HASH_PREV_APPROVED_SLIP_SAMPLE').toString('base64'),
     },
     {
-      id: 'SCENARIO-03-TAMPERED-AMOUNT',
-      title: '03. Photoshopped / Altered Amount',
+      id: 'OP-05-REUSED-PAYMENT',
+      title: '05. Reused Payment (Another Customer\'s Order)',
+      situation: 'Reused payment',
       category: 'Fraud Defense',
-      description: 'Customer edited $15.00 into $150.00 using image editing software. Gemini multimodal model flags abnormal font kerning and pixel halos (tamper score 0.89). Rejected in Stage 3.',
+      description: 'A genuine payment is submitted for another customer\'s order. The reference code TXN-REUSED-9901 was already credited to another user in the registry.',
       expectedDecision: 'REJECTED',
-      expectedRejectionCategory: 'TAMPERED_SLIP',
+      expectedCategory: 'REUSED_PAYMENT',
+      expectedStageFailure: 3,
+      orderId: 'ORD-8493',
+      slipDescription: 'Submitting genuine transfer reference TXN-REUSED-9901 previously credited to order ORD-8488',
+      slipImageDataUrl: createSvgSlipDataUrl({
+        bankName: 'Siam Commercial Bank',
+        bankColor: '#4c1d95',
+        amount: 250.0,
+        currency: 'THB',
+        refNumber: 'TXN-REUSED-9901',
+        dateStr: '2026-09-28 14:00:00',
+        senderName: 'Siriporn Miller',
+        senderAcc: 'x-7712',
+        recipientName: 'PayVerify Cloud Services Ltd',
+        recipientAcc: '042-8-91283-4',
+      }),
+    },
+    {
+      id: 'OP-06-SAME-PAYMENT-DIFF-IMAGE',
+      title: '06. Same Payment, Different Image / Crop',
+      situation: 'Same payment, different image',
+      category: 'Fraud Defense',
+      description: 'The same transaction is submitted as different screenshots/photos/crops. SHA-256 binary hash differs, but Stage 3 detects identical reference code #SCB-GENUINE-REF-8821.',
+      expectedDecision: 'REJECTED',
+      expectedCategory: 'SAME_PAYMENT_DIFFERENT_IMAGE',
+      expectedStageFailure: 3,
+      orderId: 'ORD-8491',
+      slipDescription: 'Cropped / alternate photograph of previously submitted transaction SCB-GENUINE-REF-8821',
+      slipImageDataUrl: createSvgSlipDataUrl({
+        bankName: 'Siam Commercial Bank',
+        bankColor: '#4c1d95',
+        amount: 150.0,
+        currency: 'THB',
+        refNumber: 'SCB-GENUINE-REF-8821',
+        dateStr: '2026-09-28 14:15:00',
+        senderName: 'Alice Wong',
+        senderAcc: 'x-3321',
+        recipientName: 'PayVerify Cloud Services Ltd',
+        recipientAcc: '042-8-91283-4',
+        isCropped: true,
+      }),
+    },
+    {
+      id: 'OP-07-OLD-PAYMENT',
+      title: '07. Old Payment (Stale Past Transaction)',
+      situation: 'Old payment',
+      category: 'Rule Engine',
+      description: 'A genuine payment from a previous transaction (dated 14 days ago) is submitted for a new order. Stage 3 checks freshness window and rejects.',
+      expectedDecision: 'REJECTED',
+      expectedCategory: 'OLD_PAYMENT',
+      expectedStageFailure: 3,
+      orderId: 'ORD-8494',
+      slipDescription: 'Genuine slip with transfer timestamp 14 days older than order creation',
+      slipImageDataUrl: createSvgSlipDataUrl({
+        bankName: 'Kasikornbank',
+        bankColor: '#065f46',
+        amount: 1200.0,
+        currency: 'THB',
+        refNumber: 'KBANK-OLD-11029',
+        dateStr: '2026-09-14 09:30:00',
+        senderName: 'Kittisak Wong',
+        senderAcc: 'x-4819',
+        recipientName: 'PayVerify Cloud Services Ltd',
+        recipientAcc: '042-8-91283-4',
+      }),
+    },
+    {
+      id: 'OP-08-EDITED-SLIP',
+      title: '08. Edited or Suspicious Slip',
+      situation: 'Edited or suspicious slip',
+      category: 'Fraud Defense',
+      description: 'Information such as amount or reference was manipulated with photo-editing tools. Gemini multimodal forensic inspection flags font kerning and pixel halos (Score 89%).',
+      expectedDecision: 'REJECTED',
+      expectedCategory: 'EDITED_SLIP',
       expectedStageFailure: 3,
       orderId: 'ORD-8491',
       slipDescription: 'Slip with manipulated amount digits and mismatched font metrics',
@@ -188,80 +321,64 @@ export function getTestScenarios(): TestScenario[] {
       }),
     },
     {
-      id: 'SCENARIO-04-UNDERPAYMENT',
-      title: '04. Amount Mismatch (Underpayment)',
-      category: 'Rule Engine',
-      description: 'Order requires 890.00 THB, but customer only transferred 500.00 THB. Stage 3 detects amount discrepancy and rejects with clear customer calculation.',
-      expectedDecision: 'REJECTED',
-      expectedRejectionCategory: 'AMOUNT_MISMATCH',
-      expectedStageFailure: 3,
-      orderId: 'ORD-8492',
-      slipDescription: 'Slip for 500.00 THB submitted for an 890.00 THB order',
+      id: 'OP-09-UNCLEAR-IMAGE',
+      title: '09. Unclear Image (Blurry / Dark / Low-Resolution)',
+      situation: 'Unclear image',
+      category: 'Uncertainty Handling',
+      description: 'The slip is blurry, cropped, dark, or difficult to read. System marks NEEDS_VERIFICATION with an actionable prompt to send a clearer screenshot.',
+      expectedDecision: 'NEEDS_VERIFICATION',
+      expectedCategory: 'UNCLEAR_IMAGE',
+      expectedStageFailure: 2,
+      orderId: 'ORD-8494',
+      slipDescription: 'Optical motion-blurred photograph with illegible text',
       slipImageDataUrl: createSvgSlipDataUrl({
         bankName: 'Kasikornbank',
         bankColor: '#065f46',
+        amount: 1200.0,
+        currency: 'THB',
+        refNumber: 'KBANK-99120',
+        dateStr: '2026-09-28 14:12:00',
+        senderName: 'Kittisak Wong',
+        senderAcc: 'x-4819',
+        recipientName: 'PayVerify Cloud Services Ltd',
+        recipientAcc: '042-8-91283-4',
+        isBlurry: true,
+        isLegible: false,
+      }),
+    },
+    {
+      id: 'OP-10-CONFLICTING-EVIDENCE',
+      title: '10. Conflicting Evidence (Slip vs Bank Feed)',
+      situation: 'Conflicting evidence',
+      category: 'Cross-Reconciliation',
+      description: 'Information extracted from slip contradicts bank SMS data: Slip claims 500.00 THB with ref SCB-CONFLICT-500, but bank SMS reports credit was only 50.00 THB!',
+      expectedDecision: 'REJECTED',
+      expectedCategory: 'CONFLICTING_EVIDENCE',
+      expectedStageFailure: 4,
+      orderId: 'ORD-8496',
+      slipDescription: 'Slip claiming 500.00 THB under ref SCB-CONFLICT-500, but bank SMS recorded 50.00 THB',
+      slipImageDataUrl: createSvgSlipDataUrl({
+        bankName: 'Siam Commercial Bank',
+        bankColor: '#4c1d95',
         amount: 500.0,
         currency: 'THB',
-        refNumber: 'KBANK-2026-44102',
-        dateStr: '2026-09-28 14:10:00',
-        senderName: 'Ananya Tech Co.',
-        senderAcc: 'x-4190',
+        refNumber: 'SCB-CONFLICT-500',
+        dateStr: '2026-09-28 14:20:00',
+        senderName: 'Tanawat Sukjai',
+        senderAcc: 'x-4321',
         recipientName: 'PayVerify Cloud Services Ltd',
         recipientAcc: '042-8-91283-4',
       }),
+      simulatedSmsPreloaded: true,
     },
     {
-      id: 'SCENARIO-05-WRONG-ACCOUNT',
-      title: '05. Wrong Receiving Account',
-      category: 'Rule Engine',
-      description: 'Customer transferred money to a personal friend account (ending 9991) instead of the merchant account (ending 2834). Rejected at Stage 3 with account highlight.',
-      expectedDecision: 'REJECTED',
-      expectedRejectionCategory: 'ACCOUNT_MISMATCH',
-      expectedStageFailure: 3,
-      orderId: 'ORD-8493',
-      slipDescription: 'Slip sent to personal account 819-2-99991-0',
-      slipImageDataUrl: createSvgSlipDataUrl({
-        bankName: 'Siam Commercial Bank',
-        bankColor: '#4c1d95',
-        amount: 250.0,
-        currency: 'THB',
-        refNumber: 'SCB-2026-99381',
-        dateStr: '2026-09-28 14:05:00',
-        senderName: 'Siriporn Miller',
-        senderAcc: 'x-7712',
-        recipientName: 'Mr. Unaffiliated Third-Party',
-        recipientAcc: '819-2-99991-0',
-      }),
-    },
-    {
-      id: 'SCENARIO-06-REUSED-REFERENCE',
-      title: '06. Reused Reference Number Collision',
-      category: 'Fraud Defense',
-      description: 'Customer attempts to submit a newly generated slip graphic bearing a transaction reference code (TXN-REUSED-9901) that was already claimed by an older order.',
-      expectedDecision: 'REJECTED',
-      expectedRejectionCategory: 'REUSED_REFERENCE',
-      expectedStageFailure: 3,
-      orderId: 'ORD-8493',
-      slipDescription: 'New graphic with recycled reference # TXN-REUSED-9901',
-      slipImageDataUrl: createSvgSlipDataUrl({
-        bankName: 'Siam Commercial Bank',
-        bankColor: '#4c1d95',
-        amount: 250.0,
-        currency: 'THB',
-        refNumber: 'TXN-REUSED-9901',
-        dateStr: '2026-09-28 14:00:00',
-        senderName: 'Siriporn Miller',
-        senderAcc: 'x-7712',
-        recipientName: 'PayVerify Cloud Services Ltd',
-        recipientAcc: '042-8-91283-4',
-      }),
-    },
-    {
-      id: 'SCENARIO-07-DELAYED-SMS',
-      title: '07. Delayed Bank SMS (Pending Auto-Reconciliation)',
+      id: 'OP-11-MISSING-EVIDENCE',
+      title: '11. Missing Evidence (Awaiting Bank Settlement Confirmation)',
+      situation: 'Missing evidence',
       category: 'Cross-Reconciliation',
-      description: 'Slip is 100% genuine and matches 250.00 THB order. However, bank SMS gateway has not arrived yet. Marked NEEDS_VERIFICATION. Ingesting SMS will auto-approve it!',
+      description: 'The system cannot confidently establish that payment occurred because no matching deposit notification has arrived yet in the bank feed. Queued for auto-reconciliation.',
       expectedDecision: 'NEEDS_VERIFICATION',
+      expectedCategory: 'MISSING_EVIDENCE',
       orderId: 'ORD-8493',
       slipDescription: 'Legitimate slip for 250.00 THB, bank SMS pending delivery',
       slipImageDataUrl: createSvgSlipDataUrl({
@@ -281,74 +398,27 @@ export function getTestScenarios(): TestScenario[] {
       simulatedSmsPreloaded: false,
     },
     {
-      id: 'SCENARIO-08-REUSED-SMS-CLAIM',
-      title: '08. Conflicting Bank SMS (Double-Claim Attack)',
-      category: 'Fraud Defense',
-      description: 'Attacker creates a slip with amount 320.00 THB matching an SMS that has already been reconciled with order ORD-8490. Stage 4 catches the claim conflict.',
-      expectedDecision: 'REJECTED',
-      expectedRejectionCategory: 'CLAIM_CONFLICT',
+      id: 'OP-12-SIMILAR-PAYMENTS',
+      title: '12. Multiple Customers with Similar Payments',
+      situation: 'Multiple customers with similar payments',
+      category: 'Anti-False-Attribution',
+      description: 'Multiple customers (ORD-8491 & ORD-8495) expect identical 150.00 THB around the same time. System avoids assuming matching amount proves ownership without reference/sender match!',
+      expectedDecision: 'NEEDS_VERIFICATION',
+      expectedCategory: 'AMBIGUOUS_SIMILAR_PAYMENTS',
       expectedStageFailure: 4,
-      orderId: 'ORD-8494',
-      slipDescription: 'Slip targeting already-claimed SMS-102 (320.00 THB)',
+      orderId: 'ORD-8495',
+      slipDescription: 'Generic deposit slip for 150.00 THB where SMS feed lacks unique reference number',
       slipImageDataUrl: createSvgSlipDataUrl({
-        bankName: 'Kasikornbank',
-        bankColor: '#065f46',
-        amount: 320.0,
+        bankName: 'Siam Commercial Bank',
+        bankColor: '#4c1d95',
+        amount: 150.0,
         currency: 'THB',
-        refNumber: 'KBANK-77182',
-        dateStr: '2026-09-28 11:04:00',
-        senderName: 'Kittisak Wong',
-        senderAcc: 'x-4819',
+        refNumber: 'SCB-UNLINKED-150',
+        dateStr: '2026-09-28 14:16:00',
+        senderName: 'Kamonwan Boonmee',
+        senderAcc: 'x-7766',
         recipientName: 'PayVerify Cloud Services Ltd',
         recipientAcc: '042-8-91283-4',
-      }),
-    },
-    {
-      id: 'SCENARIO-09-STALE-DATE',
-      title: '09. Expired / Stale Transfer Slip',
-      category: 'Rule Engine',
-      description: 'Customer submits a slip from 14 days ago. Stage 3 calculates time delta exceeds the 24-hour merchant stale threshold and rejects.',
-      expectedDecision: 'REJECTED',
-      expectedRejectionCategory: 'STALE_DATE',
-      expectedStageFailure: 3,
-      orderId: 'ORD-8494',
-      slipDescription: 'Old slip dated 14 days before order creation',
-      slipImageDataUrl: createSvgSlipDataUrl({
-        bankName: 'Kasikornbank',
-        bankColor: '#065f46',
-        amount: 1200.0,
-        currency: 'THB',
-        refNumber: 'KBANK-OLD-11029',
-        dateStr: '2026-09-14 09:30:00',
-        senderName: 'Kittisak Wong',
-        senderAcc: 'x-4819',
-        recipientName: 'PayVerify Cloud Services Ltd',
-        recipientAcc: '042-8-91283-4',
-      }),
-    },
-    {
-      id: 'SCENARIO-10-BLURRY-ILLEGIBLE',
-      title: '10. Blurry / Unreadable Camera Shot',
-      category: 'OCR Quality',
-      description: 'Customer submitted a heavily blurred, out-of-focus slip photo. Gemini OCR detects low legibility (confidence 0.25) and requests a clearer photo.',
-      expectedDecision: 'REJECTED',
-      expectedRejectionCategory: 'ILLEGIBLE_SLIP',
-      expectedStageFailure: 2,
-      orderId: 'ORD-8494',
-      slipDescription: 'Optical motion-blurred photograph',
-      slipImageDataUrl: createSvgSlipDataUrl({
-        bankName: 'Kasikornbank',
-        bankColor: '#065f46',
-        amount: 1200.0,
-        currency: 'THB',
-        refNumber: 'KBANK-99120',
-        dateStr: '2026-09-28 14:12:00',
-        senderName: 'Kittisak Wong',
-        senderAcc: 'x-4819',
-        recipientName: 'PayVerify Cloud Services Ltd',
-        recipientAcc: '042-8-91283-4',
-        isBlurry: true,
-        isLegible: false,
       }),
     },
   ];

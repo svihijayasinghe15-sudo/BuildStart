@@ -138,6 +138,7 @@ Output structured JSON matching the provided schema.`;
       recipientAccount: cleanAccount(parsed.recipientAccount || ''),
       referenceNumber: parsed.referenceNumber || 'TXN-' + Math.random().toString(36).substring(2, 9).toUpperCase(),
       isLegible: Boolean(parsed.isLegible),
+      isCroppedOrDark: Boolean(parsed.isCroppedOrDark),
       tamperScore: Math.min(1.0, Math.max(0.0, Number(parsed.tamperScore) || 0)),
       tamperReasons: Array.isArray(parsed.tamperReasons) ? parsed.tamperReasons : [],
       confidence: Math.min(1.0, Math.max(0.0, Number(parsed.confidence) || 0.9)),
@@ -217,6 +218,7 @@ function generateHeuristicExtraction(
     recipientAccount,
     referenceNumber: lower.includes('reusedref') ? 'TXN-REUSED-9901' : 'TXN-' + Math.floor(100000 + Math.random() * 900000),
     isLegible: !isIllegible,
+    isCroppedOrDark: lower.includes('crop') || lower.includes('dark'),
     tamperScore: isTampered ? 0.88 : (isIllegible ? 0.35 : 0.04),
     tamperReasons: isTampered
       ? ['Inconsistent font kerning on amount value', 'JPEG noise halo indicates altered pixel boundary on amount digits']
